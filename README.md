@@ -1,10 +1,10 @@
 
 
 <!-- markdownlint-disable -->
-<a href="https://cpco.io/homepage"><img src="https://github.com/cloudposse/terraform-example-module/blob/main/.github/banner.png?raw=true" alt="Project Banner"/></a><br/>
+<a href="https://cpco.io/homepage"><img src="https://github.com/cloudposse/terraform-aws-ipam/blob/main/.github/banner.png?raw=true" alt="Project Banner"/></a><br/>
 
 
-<p align="right"><a href="https://github.com/cloudposse/terraform-example-module/releases/latest"><img src="https://img.shields.io/github/release/cloudposse/terraform-example-module.svg?style=for-the-badge" alt="Latest Release"/></a><a href="https://github.com/cloudposse/terraform-example-module/commits"><img src="https://img.shields.io/github/last-commit/cloudposse/terraform-example-module.svg?style=for-the-badge" alt="Last Updated"/></a><a href="https://cloudposse.com/slack"><img src="https://slack.cloudposse.com/for-the-badge.svg" alt="Slack Community"/></a><a href="https://cloudposse.com/support/"><img src="https://img.shields.io/badge/Get_Support-success.svg?style=for-the-badge" alt="Get Support"/></a>
+<p align="right"><a href="https://github.com/cloudposse/terraform-aws-ipam/releases/latest"><img src="https://img.shields.io/github/release/cloudposse/terraform-aws-ipam.svg?style=for-the-badge" alt="Latest Release"/></a><a href="https://github.com/cloudposse/terraform-aws-ipam/commits"><img src="https://img.shields.io/github/last-commit/cloudposse/terraform-aws-ipam.svg?style=for-the-badge" alt="Last Updated"/></a><a href="https://cloudposse.com/slack"><img src="https://slack.cloudposse.com/for-the-badge.svg" alt="Slack Community"/></a><a href="https://cloudposse.com/support/"><img src="https://img.shields.io/badge/Get_Support-success.svg?style=for-the-badge" alt="Get Support"/></a>
 
 </p>
 <!-- markdownlint-restore -->
@@ -30,8 +30,24 @@
 
 -->
 
-Short
-description
+Terraform module to provision:
+
+- [Amazon VPC IP Address Manager (IPAM)](https://docs.aws.amazon.com/vpc/latest/ipam/what-it-is-ipam.html)
+- [Private IPAM scopes](https://docs.aws.amazon.com/vpc/latest/ipam/how-it-works-ipam.html) (public scopes cannot be created; the one AWS
+  makes with the IPAM is exported as `public_default_scope_id`)
+- [IPAM pools](https://docs.aws.amazon.com/vpc/latest/ipam/how-it-works-ipam.html), nested up to four levels deep, including VPC
+  resource-planning pools via `source_resource`
+- [CIDRs provisioned into those pools](https://docs.aws.amazon.com/vpc/latest/ipam/prov-cidr-ipam.html), by explicit CIDR or by netmask
+  length, with BYOIP authorization contexts where required
+- [Manual CIDR reservations](https://docs.aws.amazon.com/vpc/latest/ipam/allocate-cidrs-ipam.html) that hold space inside a pool without
+  attaching it to anything
+- [Resource discovery](https://docs.aws.amazon.com/vpc/latest/ipam/res-disc-work-with.html) and resource discovery associations, for
+  cross-account and cross-organization monitoring, with organizational unit exclusions
+- [AWS Resource Access Manager (AWS RAM)](https://docs.aws.amazon.com/ram/latest/userguide/what-is.html) resource shares, to share
+  individual pools with accounts, organizational units, or the whole organization
+- [Delegated IPAM administration](https://docs.aws.amazon.com/vpc/latest/ipam/enable-integ-ipam.html) via the
+  [`organization-admin`](modules/organization-admin) submodule
+
 
 
 > [!TIP]
@@ -46,39 +62,239 @@ description
 > </detalis>
 
 
+
 ## Introduction
 
-This is an introduction.
+### The pool hierarchy
+
+IPAM pools form a tree: a top-level pool holds a supernet, Regional pools draw
+from it, and workload pools draw from those. This module takes that tree as a
+**flat `map(object)` keyed by your own name for each pool**, where a pool names
+its parent rather than being physically nested inside it:
+
+```hcl
+pools = {
+  core     = { cidrs = { primary = { cidr = "10.0.0.0/8" } } }
+  regional = { parent = "core", locale = "us-east-2", cidrs = { primary = { netmask_length = 12 } } }
+  env      = { parent = "regional", locale = "us-east-2", cidrs = { primary = { netmask_length = 16 } } }
+}
+```
+
+Two reasons it is flat rather than nested:
+
+1. **Terraform cannot express a recursive type.** A nested `sub_pools` attribute
+   forces `type = any`, which gives up schema documentation, IDE completion, and
+   terraform-docs output. That is exactly what happened to `aws-ia/ipam`, whose
+   central `pool_configurations` input is `type = any` with a 25-line prose
+   schema in a comment. Every input in this module is concretely typed.
+2. **Keys stay stable.** Adding or removing a pool does not disturb the
+   `for_each` keys of its siblings, and the `pool_ids` output stays keyed by the
+   names you chose.
+
+Map keys must be known at `plan` time — they come from your configuration, not
+from another resource's attributes.
+
+### Following a convention, and setting one
+
+Worth being precise about which is which:
+
+- The **input shape** follows an existing Cloud Posse convention. A flat
+  `map(object)` keyed by a logical name, concretely typed, `default = {}`,
+  `nullable = false`, key semantics in an inline comment, and the plan-time-key
+  caveat stated in the description is `terraform-aws-eks-cluster`'s
+  `access_entry_map` applied to a new domain.
+- The **per-depth materialisation** sets one. No Cloud Posse module had
+  previously modelled a hierarchy, so `aws_vpc_ipam_pool.level_0` … `.level_3`,
+  the depth partition in `locals`, and the `precondition` guards are new. They
+  follow the *spirit* of two existing patterns rather than any direct
+  precedent: `terraform-aws-dynamic-subnets` duplicates a near-identical
+  resource set across a structural dimension in-repo (`public.tf` / `private.tf`)
+  with the branching precomputed in `locals`, and `terraform-aws-vpc` already
+  splits level 0 from level N for a single concept — a `count`-gated
+  `aws_vpc.default` plus a `for_each`-keyed
+  `aws_vpc_ipv4_cidr_block_association.default` referencing it, which is
+  structurally one pool tier.
+
+### Why tiers are resources here, not a child module
+
+`aws-ia/ipam` solves the same recursion problem by calling a shared
+`./modules/sub_pool` child module once per depth. This module uses four
+resources in the root instead, deliberately:
+
+- A `sub_pool` module has no standalone value. Every `modules/*` in the Cloud
+  Posse fleet is separately documented and separately consumable; a
+  deduplication helper is not.
+- It keeps resource addresses shallow and predictable —
+  `aws_vpc_ipam_pool.level_1["core"]` rather than
+  `module.level_one["core"].aws_vpc_ipam_pool.sub[0]`. That matters concretely:
+  a consumer migrating between modules has to hand-write `moved` blocks against
+  these addresses, because a `moved` block can only name addresses relative to
+  its own module instance and so cannot be shipped here. Burying addresses one
+  module deep is precisely what makes migrating *off* `aws-ia/ipam` painful, so
+  reproducing it would be self-defeating.
+- A child module would need its own `context.tf`, `versions.tf` and
+  `README.md`, and CI runs the full bats and tflint matrix over every directory
+  containing a `.tf` file.
+
+### Depth is capped at 4
+
+A pool hierarchy in this module can be **four levels deep**: a top-level pool
+plus three generations beneath it. This is a Terraform limitation rather than an
+AWS one. A resource cannot reference itself, so
+`source_ipam_pool_id = aws_vpc_ipam_pool.this[each.value.parent].id` inside
+`aws_vpc_ipam_pool.this` is a cycle. The module instead partitions your map by
+computed depth and declares four tiers: `aws_vpc_ipam_pool.level_0` through
+`.level_3`.
+
+A deeper tree, a `parent` that names no existing pool, and a cycle in the
+`parent` links are each rejected at plan time by a separate check that names
+the offending pools — the three are reported distinctly rather than lumped
+together, since a cycle is not a depth problem. Raising the cap later is a
+non-breaking change: one more tier, no input or output shape change, no state
+movement for existing pools.
+
+### Create and destroy ordering
+
+CIDR provisioning is tiered alongside the pools, so creation runs
+pool → its CIDRs → child pool → child's CIDRs, and destruction runs exactly
+backwards. This is not cosmetic: `DeprovisionIpamPoolCidr` fails while any
+allocation exists against a CIDR, and a child pool's provisioned CIDR is such an
+allocation. Manual reservations likewise carry an explicit `depends_on` to the
+pool CIDRs, because an allocation that references only `ipam_pool_id` gets no
+dependency edge to the CIDR it consumes. Getting this wrong does not fail fast —
+it burns the provider's 32-minute allocation-release timeout and *then* fails.
+
+The module cannot order things it cannot see. A VPC or subnet created from one
+of these pools makes an allocation outside this module's graph, and AWS takes up
+to 20 minutes to release it after the consumer is deleted. Keep such consumers
+in the same configuration with a `depends_on`, or expect a cold destroy to sit
+in that wait.
+
+### Provider floor
+
+The module requires AWS provider **`>= 6.56.0`**. The strict floor for the
+complete argument surface is 6.48.0, which added `tags` to
+`aws_vpc_ipam_pool_cidr_allocation`. The higher floor buys two fixes that matter
+to IPAM specifically: `aws_subnet` now waits for IPAM to release its CIDR on
+delete — the one destroy-ordering hazard no amount of `depends_on` inside this
+module can fix — and resource-planning pools no longer fail when the VPC lives
+in another account. Pin lower only if you use neither IPAM-backed subnets nor
+cross-account `source_resource` pools.
+
+### Migrating from `aws-ia/ipam`
+
+See [docs/migration-aws-ia-v1.md](docs/migration-aws-ia-v1.md) for the input
+mapping, the `moved` blocks to write in your root module, and `state mv` /
+`import` fallbacks.
 
 
+> [!TIP]
+> #### Use Terraform Reference Architectures for AWS
+>
+> Use Cloud Posse's ready-to-go [terraform architecture blueprints](https://cloudposse.com/reference-architecture/) for AWS to get up and running quickly.
+>
+> ✅ We build it together with your team.<br/>
+> ✅ Your team owns everything.<br/>
+> ✅ 100% Open Source and backed by fanatical support.<br/>
+>
+> <a href="https://cpco.io/commercial-support?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-aws-ipam&utm_content=commercial_support"><img alt="Request Quote" src="https://img.shields.io/badge/request%20quote-success.svg?style=for-the-badge"/></a>
+> <details><summary>📚 <strong>Learn More</strong></summary>
+>
+> <br/>
+>
+> Cloud Posse is the leading [**DevOps Accelerator**](https://cpco.io/commercial-support?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-aws-ipam&utm_content=commercial_support) for funded startups and enterprises.
+>
+> *Your team can operate like a pro today.*
+>
+> Ensure that your team succeeds by using Cloud Posse's proven process and turnkey blueprints. Plus, we stick around until you succeed.
+> #### Day-0:  Your Foundation for Success
+> - **Reference Architecture.** You'll get everything you need from the ground up built using 100% infrastructure as code.
+> - **Deployment Strategy.** Adopt a proven deployment strategy with GitHub Actions, enabling automated, repeatable, and reliable software releases.
+> - **Site Reliability Engineering.** Gain total visibility into your applications and services with Datadog, ensuring high availability and performance.
+> - **Security Baseline.** Establish a secure environment from the start, with built-in governance, accountability, and comprehensive audit logs, safeguarding your operations.
+> - **GitOps.** Empower your team to manage infrastructure changes confidently and efficiently through Pull Requests, leveraging the full power of GitHub Actions.
+>
+> <a href="https://cpco.io/commercial-support?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-aws-ipam&utm_content=commercial_support"><img alt="Request Quote" src="https://img.shields.io/badge/request%20quote-success.svg?style=for-the-badge"/></a>
+>
+> #### Day-2: Your Operational Mastery
+> - **Training.** Equip your team with the knowledge and skills to confidently manage the infrastructure, ensuring long-term success and self-sufficiency.
+> - **Support.** Benefit from a seamless communication over Slack with our experts, ensuring you have the support you need, whenever you need it.
+> - **Troubleshooting.** Access expert assistance to quickly resolve any operational challenges, minimizing downtime and maintaining business continuity.
+> - **Code Reviews.** Enhance your team’s code quality with our expert feedback, fostering continuous improvement and collaboration.
+> - **Bug Fixes.** Rely on our team to troubleshoot and resolve any issues, ensuring your systems run smoothly.
+> - **Migration Assistance.** Accelerate your migration process with our dedicated support, minimizing disruption and speeding up time-to-value.
+> - **Customer Workshops.** Engage with our team in weekly workshops, gaining insights and strategies to continuously improve and innovate.
+>
+> <a href="https://cpco.io/commercial-support?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-aws-ipam&utm_content=commercial_support"><img alt="Request Quote" src="https://img.shields.io/badge/request%20quote-success.svg?style=for-the-badge"/></a>
+> 
+</details>
 
 
 ## Usage
 
-For a complete example, see [examples/complete](examples/complete).
-
-For automated tests of the complete example using [bats](https://github.com/bats-core/bats-core) and [Terratest](https://github.com/gruntwork-io/terratest)
-(which tests and deploys the example on AWS), see [test](test).
+Here's how to invoke this module in your projects:
 
 ```hcl
-# Create a standard label resource. See [null-label](https://github.com/cloudposse/terraform-null-label/#terraform-null-label--)
-module "label" {
-  source  = "cloudposse/label/null"
-  # Cloud Posse recommends pinning every module to a specific version, though usually you want to use the current one
-  # version = "x.x.x"
-
-  namespace = "eg"
-  name      = "example"
-}
-
-module "example" {
-  source  = "cloudposse/*****/aws"
+module "ipam" {
+  source  = "cloudposse/ipam/aws"
   # Cloud Posse recommends pinning every module to a specific version
   # version = "x.x.x"
 
-  example = "Hello world!"
+  operating_regions = ["us-east-2", "us-west-2"]
 
-  context = module.label.this
+  pools = {
+    core = {
+      cidrs = {
+        primary = { cidr = "10.0.0.0/8" }
+      }
+    }
+
+    use2 = {
+      parent = "core"
+      locale = "us-east-2"
+      cidrs = {
+        primary = { netmask_length = 12 }
+      }
+
+      # Share this pool with the whole organization
+      ram_share = {
+        principals = ["arn:aws:organizations::123456789012:organization/o-abcde12345"]
+      }
+    }
+
+    use2_prod = {
+      parent                            = "use2"
+      locale                            = "us-east-2"
+      allocation_default_netmask_length = 24
+
+      cidrs = {
+        primary = { netmask_length = 16 }
+      }
+
+      # Hold space inside the pool without attaching it to anything
+      allocations = {
+        reserved = { netmask_length = 20, description = "Held for future use" }
+      }
+    }
+  }
+
+  context = module.this.context
+}
+```
+
+Consumers index the `pool_ids` output by the names they supplied:
+
+```hcl
+module "vpc" {
+  source  = "cloudposse/vpc/aws"
+  version = "2.2.0"
+
+  ipv4_primary_cidr_block_association = {
+    ipv4_ipam_pool_id   = module.ipam.pool_ids["use2_prod"]
+    ipv4_netmask_length = 20
+  }
+
+  context = module.this.context
 }
 ```
 
@@ -93,11 +309,42 @@ module "example" {
 
 ## Quick Start
 
-Here's how to get started...
+The smallest useful configuration is an IPAM with a single pool:
+
+```hcl
+module "ipam" {
+  source  = "cloudposse/ipam/aws"
+  # version = "x.x.x"
+
+  pools = {
+    core = {
+      cidrs = {
+        primary = { cidr = "10.0.0.0/8" }
+      }
+    }
+  }
+
+  context = module.this.context
+}
+```
+
+This creates the IPAM (which brings its own public scope, private scope, default
+resource discovery, and default association), one top-level pool in the private
+default scope, and provisions `10.0.0.0/8` into it. Grow the tree by adding
+entries that name `core` as their `parent`.
+
+Note that the provider defaults an IPAM to the billable `advanced` tier. Set
+`ipam_tier = "free"` if that is what you want.
 ## Examples
 
 Here is an example of using this module:
-- [`examples/complete`](https://github.com/cloudposse/terraform-example-module/) - complete example of using this module
+
+- [`examples/complete`](https://github.com/cloudposse/terraform-aws-ipam/tree/main/examples/complete) - builds a full four-level pool
+  hierarchy in a named private scope, provisions a CIDR into each tier, holds a manual reservation in the deepest pool, and creates a
+  resource discovery
+
+For automated tests of the complete example using [Terratest](https://github.com/gruntwork-io/terratest) (which tests and deploys the
+example on AWS), see [test](https://github.com/cloudposse/terraform-aws-ipam/tree/main/test).
 
 
 
@@ -106,48 +353,91 @@ Here is an example of using this module:
 ## Requirements
 
 | Name | Version |
-|------|---------|
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.0 |
-| <a name="requirement_random"></a> [random](#requirement\_random) | >= 2.2 |
+| ---- | ------- |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.4.0 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.56.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_random"></a> [random](#provider\_random) | >= 2.2 |
+| ---- | ------- |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.66.0 |
+| <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
 
 ## Modules
 
 | Name | Source | Version |
-|------|--------|---------|
+| ---- | ------ | ------- |
+| <a name="module_pool_label"></a> [pool\_label](#module\_pool\_label) | cloudposse/label/null | 0.25.0 |
+| <a name="module_resource_discovery_association_label"></a> [resource\_discovery\_association\_label](#module\_resource\_discovery\_association\_label) | cloudposse/label/null | 0.25.0 |
+| <a name="module_scope_label"></a> [scope\_label](#module\_scope\_label) | cloudposse/label/null | 0.25.0 |
 | <a name="module_this"></a> [this](#module\_this) | cloudposse/label/null | 0.25.0 |
 
 ## Resources
 
 | Name | Type |
-|------|------|
-| [random_integer.example](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/integer) | resource |
+| ---- | ---- |
+| [aws_ram_principal_association.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ram_principal_association) | resource |
+| [aws_ram_resource_association.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ram_resource_association) | resource |
+| [aws_ram_resource_share.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ram_resource_share) | resource |
+| [aws_vpc_ipam.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam) | resource |
+| [aws_vpc_ipam_pool.level_0](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_pool) | resource |
+| [aws_vpc_ipam_pool.level_1](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_pool) | resource |
+| [aws_vpc_ipam_pool.level_2](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_pool) | resource |
+| [aws_vpc_ipam_pool.level_3](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_pool) | resource |
+| [aws_vpc_ipam_pool_cidr.level_0](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_pool_cidr) | resource |
+| [aws_vpc_ipam_pool_cidr.level_1](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_pool_cidr) | resource |
+| [aws_vpc_ipam_pool_cidr.level_2](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_pool_cidr) | resource |
+| [aws_vpc_ipam_pool_cidr.level_3](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_pool_cidr) | resource |
+| [aws_vpc_ipam_pool_cidr_allocation.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_pool_cidr_allocation) | resource |
+| [aws_vpc_ipam_resource_discovery.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_resource_discovery) | resource |
+| [aws_vpc_ipam_resource_discovery_association.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_resource_discovery_association) | resource |
+| [aws_vpc_ipam_scope.default](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam_scope) | resource |
+| [terraform_data.pool_graph_guard](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
+| [terraform_data.resource_discovery_association_ids](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
+| [terraform_data.scope_ipam_id](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
+| [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_additional_tag_map"></a> [additional\_tag\_map](#input\_additional\_tag\_map) | Additional key-value pairs to add to each map in `tags_as_list_of_maps`. Not added to `tags` or `id`.<br/>This is for some rare cases where resources want additional configuration of tags<br/>and therefore take a list of maps with tag key, value, and additional configuration. | `map(string)` | `{}` | no |
 | <a name="input_attributes"></a> [attributes](#input\_attributes) | ID element. Additional attributes (e.g. `workers` or `cluster`) to add to `id`,<br/>in the order they appear in the list. New attributes are appended to the<br/>end of the list. The elements of the list are joined by the `delimiter`<br/>and treated as a single ID element. | `list(string)` | `[]` | no |
 | <a name="input_context"></a> [context](#input\_context) | Single object for setting entire context at once.<br/>See description of individual variables for details.<br/>Leave string and numeric variables as `null` to use default value.<br/>Individual variable settings (non-null) override settings in context object,<br/>except for attributes, tags, and additional\_tag\_map, which are merged. | `any` | <pre>{<br/>  "additional_tag_map": {},<br/>  "attributes": [],<br/>  "delimiter": null,<br/>  "descriptor_formats": {},<br/>  "enabled": true,<br/>  "environment": null,<br/>  "id_length_limit": null,<br/>  "label_key_case": null,<br/>  "label_order": [],<br/>  "label_value_case": null,<br/>  "labels_as_tags": [<br/>    "unset"<br/>  ],<br/>  "name": null,<br/>  "namespace": null,<br/>  "regex_replace_chars": null,<br/>  "stage": null,<br/>  "tags": {},<br/>  "tenant": null<br/>}</pre> | no |
+| <a name="input_create_ipam"></a> [create\_ipam](#input\_create\_ipam) | Whether to create an `aws_vpc_ipam`.<br/><br/>Set to `false` to build pools inside an IPAM that already exists — the usual<br/>shape for a second instance of this module in another Region, or for pools<br/>managed separately from the IPAM itself. When `false`, supply<br/>`existing_ipam_scope_id`, and `existing_ipam_id` as well if you need the<br/>IPAM-level outputs or any resource discovery association | `bool` | `true` | no |
+| <a name="input_create_resource_discovery"></a> [create\_resource\_discovery](#input\_create\_resource\_discovery) | Whether to create an `aws_vpc_ipam_resource_discovery`.<br/><br/>Only needed for cross-account or cross-organization monitoring. Every account<br/>already gets a default resource discovery and a default association to its own<br/>IPAM; those surface as the `default_resource_discovery_id` and<br/>`default_resource_discovery_association_id` outputs and are not managed here | `bool` | `false` | no |
 | <a name="input_delimiter"></a> [delimiter](#input\_delimiter) | Delimiter to be used between ID elements.<br/>Defaults to `-` (hyphen). Set to `""` to use no delimiter at all. | `string` | `null` | no |
 | <a name="input_descriptor_formats"></a> [descriptor\_formats](#input\_descriptor\_formats) | Describe additional descriptors to be output in the `descriptors` output map.<br/>Map of maps. Keys are names of descriptors. Values are maps of the form<br/>`{<br/>   format = string<br/>   labels = list(string)<br/>}`<br/>(Type is `any` so the map values can later be enhanced to provide additional options.)<br/>`format` is a Terraform format string to be passed to the `format()` function.<br/>`labels` is a list of labels, in order, to pass to `format()` function.<br/>Label values will be normalized before being passed to `format()` so they will be<br/>identical to how they appear in `id`.<br/>Default is `{}` (`descriptors` output will be empty). | `any` | `{}` | no |
 | <a name="input_enabled"></a> [enabled](#input\_enabled) | Set to false to prevent the module from creating any resources | `bool` | `null` | no |
 | <a name="input_environment"></a> [environment](#input\_environment) | ID element. Usually used for region e.g. 'uw2', 'us-west-2', OR role 'prod', 'staging', 'dev', 'UAT' | `string` | `null` | no |
-| <a name="input_example"></a> [example](#input\_example) | Example variable | `string` | `"hello world"` | no |
+| <a name="input_existing_ipam_id"></a> [existing\_ipam\_id](#input\_existing\_ipam\_id) | ID of an existing `aws_vpc_ipam` to build against. Only consulted when `create_ipam` is `false` | `string` | `null` | no |
+| <a name="input_existing_ipam_scope_id"></a> [existing\_ipam\_scope\_id](#input\_existing\_ipam\_scope\_id) | ID of an existing IPAM scope that top-level pools default into. Only consulted<br/>when `create_ipam` is `false`.<br/><br/>Required whenever `create_ipam` is `false` and `pools` contains a top-level<br/>pool that does not resolve a scope of its own. Scope IDs are attributes of the<br/>`aws_vpc_ipam` resource, so there is no way to look a default scope up from an<br/>IPAM ID alone — a caller binding to an existing IPAM has to pass one through | `string` | `null` | no |
 | <a name="input_id_length_limit"></a> [id\_length\_limit](#input\_id\_length\_limit) | Limit `id` to this many characters (minimum 6).<br/>Set to `0` for unlimited length.<br/>Set to `null` for keep the existing setting, which defaults to `0`.<br/>Does not affect `id_full`. | `number` | `null` | no |
+| <a name="input_ipam_cascade_enabled"></a> [ipam\_cascade\_enabled](#input\_ipam\_cascade\_enabled) | Whether to enable cascade delete on the IPAM.<br/><br/>**Delete-time only.** The provider reads this solely in its Delete path, so<br/>toggling it produces no API call and no observable change until a destroy.<br/><br/>On destroy it tears down every private scope, every pool inside them, and every<br/>allocation inside those — including address space that is in live use. Without<br/>it, destroying a non-empty IPAM fails, which is usually what you want. Leave<br/>`false` unless you are deliberately building a disposable environment | `bool` | `false` | no |
+| <a name="input_ipam_description"></a> [ipam\_description](#input\_ipam\_description) | Description for the IPAM. Defaults to the null-label ID. Only used when `create_ipam` is `true` | `string` | `null` | no |
+| <a name="input_ipam_tier"></a> [ipam\_tier](#input\_ipam\_tier) | IPAM tier. Valid values: `free`, `advanced`.<br/><br/>Leaving this `null` inherits the provider's own default of `advanced`, which is<br/>the billable tier — set `free` explicitly if that is what you want. Mutable in<br/>place | `string` | `null` | no |
+| <a name="input_ipam_timeouts"></a> [ipam\_timeouts](#input\_ipam\_timeouts) | Operation timeouts for the `aws_vpc_ipam` resource. `null` entries inherit the provider defaults of 3m each | <pre>object({<br/>    create = optional(string, null)<br/>    update = optional(string, null)<br/>    delete = optional(string, null)<br/>  })</pre> | `{}` | no |
 | <a name="input_label_key_case"></a> [label\_key\_case](#input\_label\_key\_case) | Controls the letter case of the `tags` keys (label names) for tags generated by this module.<br/>Does not affect keys of tags passed in via the `tags` input.<br/>Possible values: `lower`, `title`, `upper`.<br/>Default value: `title`. | `string` | `null` | no |
 | <a name="input_label_order"></a> [label\_order](#input\_label\_order) | The order in which the labels (ID elements) appear in the `id`.<br/>Defaults to ["namespace", "environment", "stage", "name", "attributes"].<br/>You can omit any of the 6 labels ("tenant" is the 6th), but at least one must be present. | `list(string)` | `null` | no |
 | <a name="input_label_value_case"></a> [label\_value\_case](#input\_label\_value\_case) | Controls the letter case of ID elements (labels) as included in `id`,<br/>set as tag values, and output by this module individually.<br/>Does not affect values of tags passed in via the `tags` input.<br/>Possible values: `lower`, `title`, `upper` and `none` (no transformation).<br/>Set this to `title` and set `delimiter` to `""` to yield Pascal Case IDs.<br/>Default value: `lower`. | `string` | `null` | no |
 | <a name="input_labels_as_tags"></a> [labels\_as\_tags](#input\_labels\_as\_tags) | Set of labels (ID elements) to include as tags in the `tags` output.<br/>Default is to include all labels.<br/>Tags with empty values will not be included in the `tags` output.<br/>Set to `[]` to suppress all generated tags.<br/>**Notes:**<br/>  The value of the `name` tag, if included, will be the `id`, not the `name`.<br/>  Unlike other `null-label` inputs, the initial setting of `labels_as_tags` cannot be<br/>  changed in later chained modules. Attempts to change it will be silently ignored. | `set(string)` | <pre>[<br/>  "default"<br/>]</pre> | no |
+| <a name="input_metered_account"></a> [metered\_account](#input\_metered\_account) | Which account is metered for IPAM usage. Valid values: `ipam-owner`,<br/>`resource-owner`.<br/><br/>Optional *and* Computed in the provider, so leaving it `null` never produces a<br/>diff | `string` | `null` | no |
 | <a name="input_name"></a> [name](#input\_name) | ID element. Usually the component or solution name, e.g. 'app' or 'jenkins'.<br/>This is the only ID element not also included as a `tag`.<br/>The "name" tag is set to the full `id` string. There is no tag with the value of the `name` input. | `string` | `null` | no |
 | <a name="input_namespace"></a> [namespace](#input\_namespace) | ID element. Usually an abbreviation of your organization name, e.g. 'eg' or 'cp', to help ensure generated IDs are globally unique | `string` | `null` | no |
+| <a name="input_operating_regions"></a> [operating\_regions](#input\_operating\_regions) | Regions the IPAM may discover, monitor, and allocate from.<br/><br/>The provider requires this to include the Region the module is applied into,<br/>and enforces that **at create time only** — removing the current Region later<br/>is not blocked by Terraform, though the API may still reject it. When empty,<br/>the module registers just the current Region.<br/><br/>Fully mutable: the provider diffs the set and sends add/remove to `ModifyIpam`,<br/>so growing or shrinking this list never replaces the IPAM | `list(string)` | `[]` | no |
+| <a name="input_pool_cidr_timeouts"></a> [pool\_cidr\_timeouts](#input\_pool\_cidr\_timeouts) | Operation timeouts applied to every `aws_vpc_ipam_pool_cidr`. `null` entries<br/>inherit the provider defaults of create 10m and delete 32m.<br/><br/>**Do not lower the 32m delete.** That budget is the up-to-20-minute window AWS<br/>takes to release VPC and subnet allocations after the consuming resource is<br/>deleted, plus the deprovision wait. Shortening it turns a slow destroy into a<br/>failed one | <pre>object({<br/>    create = optional(string, null)<br/>    delete = optional(string, null)<br/>  })</pre> | `{}` | no |
+| <a name="input_pool_timeouts"></a> [pool\_timeouts](#input\_pool\_timeouts) | Operation timeouts applied to every `aws_vpc_ipam_pool`. `null` entries inherit<br/>the provider defaults.<br/><br/>The provider's 35m create default is not padding — pool provisioning is<br/>genuinely slow. Do not shorten it without a reason | <pre>object({<br/>    create = optional(string, null)<br/>    update = optional(string, null)<br/>    delete = optional(string, null)<br/>  })</pre> | `{}` | no |
+| <a name="input_pools"></a> [pools](#input\_pools) | IPAM pools to create, as a flat map keyed by your own name for each pool.<br/>Keys must be known at `plan` time.<br/><br/>Hierarchy is expressed by naming another entry in this same map as a pool's<br/>`parent`, rather than by physically nesting the objects. A pool with no<br/>`parent` is top-level and sits directly in a scope. A flat keyed map is used<br/>because Terraform cannot express a recursive type — nesting would force<br/>`type = any` and give up schema documentation and IDE completion — and because<br/>the keys stay stable as pools are added and removed.<br/><br/>**Nesting is capped at a depth of 4**: a top-level pool plus three generations<br/>beneath it. The cap is a Terraform limitation rather than an AWS one — a<br/>resource cannot reference itself, so an arbitrarily deep tree cannot be built<br/>from a single `aws_vpc_ipam_pool` block. The module partitions this map by<br/>computed depth and declares four tiers, `aws_vpc_ipam_pool.level_0` through<br/>`.level_3`. A deeper tree, a `parent` naming no existing pool, and a cycle in<br/>the `parent` links are each rejected at plan time by a separate check that<br/>names the offending pools.<br/><br/>Each pool's provisioned CIDRs nest under its `cidrs`, its manual reservations<br/>under its `allocations`, and its RAM sharing under `ram_share` | <pre>map(object({<br/>    # key is your own name for the pool. It is the key of the `pool_ids`,<br/>    # `pool_arns` and `pool_cidrs` outputs, and the value another entry names in<br/>    # its `parent`. Keys must be known at `plan` time, and are a compatibility<br/>    # contract with your consumers: renaming one replaces the pool.<br/><br/>    # Name of the entry in this same map that is this pool's parent. Omit for a<br/>    # top-level pool. Nesting is capped at a depth of 4 — see the validations.<br/>    parent = optional(string, null)<br/><br/>    # --- identity. All ForceNew: changing any of these replaces the pool, and the<br/>    # --- replacement cascades to every CIDR, allocation and child pool beneath it.<br/>    address_family = optional(string, "ipv4")<br/>    locale         = optional(string, null)<br/><br/>    # Scope selection, in precedence order: an explicit `ipam_scope_id` wins, then<br/>    # `scope` naming a key of `var.scopes`, then the parent pool's scope for a<br/>    # child, then the IPAM's private default scope.<br/>    ipam_scope_id = optional(string, null)<br/>    scope         = optional(string, null)<br/><br/>    # Public-scope pools only. `aws_service` accepts `ec2` or `global-services` —<br/>    # the provider validates against the SDK enum, which carries both, even though<br/>    # the upstream documentation lists only `ec2`.<br/>    aws_service      = optional(string, null)<br/>    public_ip_source = optional(string, null)<br/><br/>    # Cannot be validated from configuration: the provider does a live scope lookup<br/>    # during apply and only sends this when `address_family` is `ipv6`, the scope is<br/>    # public, and `public_ip_source` is not `amazon`. Setting it when unavailable<br/>    # can report erroneous differences.<br/>    publicly_advertisable = optional(bool, null)<br/><br/>    # VPC resource-planning pool. The block and all four fields are ForceNew, and<br/>    # `resource_region` must equal this pool's `locale`.<br/>    source_resource = optional(object({<br/>      resource_id     = string<br/>      resource_owner  = string<br/>      resource_region = string<br/>      resource_type   = optional(string, "vpc")<br/>    }), null) # source_resource<br/><br/>    # --- mutable in place. These six are the entire payload `ModifyIpamPool` ever<br/>    # --- receives; every other argument above replaces the pool.<br/>    #<br/>    # Provider defect: the Update path reads these with `d.GetOk` rather than<br/>    # `d.HasChange`, and `GetOk` reports a zero value as unset. Resetting<br/>    # `auto_import` to `false`, any netmask length to `0`, or `description` to `""`<br/>    # is silently dropped — the API never receives it and the old value persists.<br/>    # Treat them as one-way; to clear one, replace the pool.<br/>    allocation_default_netmask_length = optional(number, null)<br/>    allocation_max_netmask_length     = optional(number, null)<br/>    allocation_min_netmask_length     = optional(number, null)<br/>    allocation_resource_tags          = optional(map(string), {})<br/>    auto_import                       = optional(bool, null)<br/>    description                       = optional(string, null)<br/><br/>    # Delete-time only, exactly as `ipam_cascade_enabled`. On destroy this tears<br/>    # down the pool's provisioned CIDRs, allocations and child pools. Note the<br/>    # pool's own Delete does not *wait* for children the way the CIDR resource<br/>    # waits for allocations — without cascade it simply fails on a non-empty pool.<br/>    cascade = optional(bool, false)<br/><br/>    tags = optional(map(string), {})<br/><br/>    # --- CIDRs provisioned into this pool, keyed by an arbitrary name. Every<br/>    # --- argument is ForceNew; the resource has no Update function at all.<br/>    cidrs = optional(map(object({<br/>      # `cidr` and `netmask_length` are mutually exclusive. Set neither and the pool<br/>      # must carry `allocation_default_netmask_length` or the apply fails.<br/>      cidr           = optional(string, null)<br/>      netmask_length = optional(number, null)<br/><br/>      # BYOIP proof of ownership: the RIR/X.509-signed message and its signature,<br/>      # needed solely when provisioning a public BYOIP range into a public-scope<br/>      # pool. Never needed for private space, and never for<br/>      # `public_ip_source = "amazon"`. Not persisted to state, so it cannot drift.<br/>      cidr_authorization_context = optional(object({<br/>        message   = optional(string, null)<br/>        signature = optional(string, null)<br/>      }), null) # cidr_authorization_context<br/>    })), {})    # cidrs<br/><br/>    # --- manual reservations against this pool, keyed by an arbitrary name.<br/>    # --- Everything except `tags` is ForceNew; the Update function is a stub that<br/>    # --- calls no API.<br/>    allocations = optional(map(object({<br/>      cidr           = optional(string, null)<br/>      netmask_length = optional(number, null)<br/><br/>      # Ranges IPAM must skip when *choosing* a block. Inert unless paired with<br/>      # `netmask_length` — with an explicit `cidr` it does nothing, silently.<br/>      disallowed_cidrs = optional(set(string), null)<br/><br/>      description = optional(string, null)<br/>      tags        = optional(map(string), {})<br/>    })), {}) # allocations<br/><br/>    # --- RAM sharing. Set `principals` to share this pool with other accounts,<br/>    # --- organizational units, or the whole organization.<br/>    ram_share = optional(object({<br/>      principals                = optional(set(string), [])<br/>      allow_external_principals = optional(bool, false)<br/>      permission_arns           = optional(set(string), null)<br/>      tags                      = optional(map(string), {})<br/>    }), null) # ram_share<br/>  }))</pre> | `{}` | no |
+| <a name="input_private_gua_enabled"></a> [private\_gua\_enabled](#input\_private\_gua\_enabled) | Whether IPAM treats your own globally-unique IPv6 ranges (from `2000::/3`) as<br/>private address space. Maps to the provider's `enable_private_gua`. Mutable in<br/>place | `bool` | `null` | no |
+| <a name="input_ram_share_permission_arns"></a> [ram\_share\_permission\_arns](#input\_ram\_share\_permission\_arns) | Default RAM permission ARNs applied to every pool share that does not set its<br/>own `permission_arns`. Leave empty to let RAM apply its default managed<br/>permission for IPAM pools | `list(string)` | `[]` | no |
 | <a name="input_regex_replace_chars"></a> [regex\_replace\_chars](#input\_regex\_replace\_chars) | Terraform regular expression (regex) string.<br/>Characters matching the regex will be removed from the ID elements.<br/>If not set, `"/[^a-zA-Z0-9-]/"` is used to remove all characters other than hyphens, letters and digits. | `string` | `null` | no |
+| <a name="input_region"></a> [region](#input\_region) | AWS Region for every resource this module creates. Leave `null` to inherit the<br/>Region from the provider configuration.<br/><br/>Changing this replaces every resource in the module. The provider applies<br/>`ForceNew` to `region` through a CustomizeDiff interceptor rather than a schema<br/>flag, so it does not show up as `ForceNew` in the resource documentation | `string` | `null` | no |
+| <a name="input_resource_discovery_associations"></a> [resource\_discovery\_associations](#input\_resource\_discovery\_associations) | Resource discoveries to associate with this IPAM, keyed by name. Keys must be<br/>known at `plan` time. This is the bind step that lets an IPAM in one account see<br/>resources discovered in another. `ipam_id` defaults to this module's IPAM.<br/><br/>Both IDs are Required but **not** ForceNew, and the provider's Update function<br/>makes zero API calls — changing either would otherwise plan an in-place update<br/>that does nothing and then reverts on the next refresh. The module forces<br/>replacement itself with `replace_triggered_by`, so changing an ID here replaces<br/>the association instead of silently doing nothing | <pre>map(object({<br/>    # key names the association and fills the null-label `attributes` slot<br/>    ipam_id                    = optional(string, null)<br/>    ipam_resource_discovery_id = string<br/>    tags                       = optional(map(string), {})<br/>  }))</pre> | `{}` | no |
+| <a name="input_resource_discovery_description"></a> [resource\_discovery\_description](#input\_resource\_discovery\_description) | Description for the resource discovery. Defaults to the null-label ID. Only used when `create_resource_discovery` is `true` | `string` | `null` | no |
+| <a name="input_resource_discovery_operating_regions"></a> [resource\_discovery\_operating\_regions](#input\_resource\_discovery\_operating\_regions) | Regions the resource discovery monitors. When empty, falls back to<br/>`operating_regions`, and then to the current Region.<br/><br/>Independent of `operating_regions`: the provider keeps the two sets in no sync<br/>whatsoever. The IPAM's set governs which `locale` values pools may use; this<br/>one governs which Regions get discovered and monitored. A discovery can watch a<br/>Region the IPAM cannot allocate into, and vice versa.<br/><br/>Like the IPAM's set, this must include the current Region at create time, and<br/>that rule is enforced on create only | `list(string)` | `[]` | no |
+| <a name="input_resource_discovery_organizational_unit_exclusions"></a> [resource\_discovery\_organizational\_unit\_exclusions](#input\_resource\_discovery\_organizational\_unit\_exclusions) | AWS Organizations entity paths to exclude from discovery — Organizations IDs<br/>joined by `/`. End a path with `/*` to exclude all child OUs. Subject to the<br/>documented IPAM quota on exclusions | `list(string)` | `[]` | no |
+| <a name="input_scopes"></a> [scopes](#input\_scopes) | Additional **private** IPAM scopes to create, keyed by name. Keys must be known<br/>at `plan` time.<br/><br/>Additional public scopes cannot be created — `CreateIpamScope` only ever<br/>produces a private scope, and there is no scope-type argument anywhere in the<br/>provider schema. The single public scope is the one IPAM creates alongside<br/>itself; consume it read-only through the `public_default_scope_id` output.<br/><br/>Only `description` is mutable; it is the one field `ModifyIpamScope` accepts | <pre>map(object({<br/>    # key is the scope name, used for the null-label `attributes` slot, as the key<br/>    # of the `scope_ids` output, and as the value a pool's `scope` names<br/>    description = optional(string, null)<br/>    tags        = optional(map(string), {})<br/>  }))</pre> | `{}` | no |
 | <a name="input_stage"></a> [stage](#input\_stage) | ID element. Usually used to indicate role, e.g. 'prod', 'staging', 'source', 'build', 'test', 'deploy', 'release' | `string` | `null` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Additional tags (e.g. `{'BusinessUnit': 'XYZ'}`).<br/>Neither the tag keys nor the tag values will be modified by this module. | `map(string)` | `{}` | no |
 | <a name="input_tenant"></a> [tenant](#input\_tenant) | ID element \_(Rarely used, not included by default)\_. A customer identifier, indicating who this instance of a resource is for | `string` | `null` | no |
@@ -155,10 +445,29 @@ Here is an example of using this module:
 ## Outputs
 
 | Name | Description |
-|------|-------------|
-| <a name="output_example"></a> [example](#output\_example) | Example output |
-| <a name="output_id"></a> [id](#output\_id) | ID of the created example |
-| <a name="output_random"></a> [random](#output\_random) | Stable random number for this example |
+| ---- | ----------- |
+| <a name="output_allocation_cidrs"></a> [allocation\_cidrs](#output\_allocation\_cidrs) | Map from `<pool name>/<allocation name>` to the CIDR reserved by each manual reservation |
+| <a name="output_allocation_ids"></a> [allocation\_ids](#output\_allocation\_ids) | Map from `<pool name>/<allocation name>` to the AWS allocation ID of each<br/>manual reservation.<br/><br/>This is `ipam_pool_allocation_id`, not the Terraform resource ID — the latter<br/>is the composite `<allocation id>_<pool id>` and is what `terraform import`<br/>takes |
+| <a name="output_default_resource_discovery_association_id"></a> [default\_resource\_discovery\_association\_id](#output\_default\_resource\_discovery\_association\_id) | ID of the resource discovery association IPAM creates alongside itself. Not managed by this module |
+| <a name="output_default_resource_discovery_id"></a> [default\_resource\_discovery\_id](#output\_default\_resource\_discovery\_id) | ID of the resource discovery IPAM creates alongside itself. Not managed by this module |
+| <a name="output_ipam_arn"></a> [ipam\_arn](#output\_ipam\_arn) | ARN of the IPAM created by this module. `null` when `create_ipam` is `false` |
+| <a name="output_ipam_id"></a> [ipam\_id](#output\_ipam\_id) | ID of the IPAM — the one created here, or `existing_ipam_id` when `create_ipam` is `false` |
+| <a name="output_pool_arns"></a> [pool\_arns](#output\_pool\_arns) | Map from the keys of `pools` to the ARN of each created pool, flattened across every depth tier |
+| <a name="output_pool_cidr_ids"></a> [pool\_cidr\_ids](#output\_pool\_cidr\_ids) | Map from `<pool name>/<cidr name>` to the Terraform ID of each provisioned pool CIDR, which is the composite `<cidr>_<pool id>` |
+| <a name="output_pool_cidrs"></a> [pool\_cidrs](#output\_pool\_cidrs) | Map from the keys of `pools` to the list of CIDRs provisioned into that pool.<br/><br/>A pool with no provisioned CIDRs maps to an empty list. Values for CIDRs<br/>requested by `netmask_length` are chosen by IPAM and so are only known after<br/>apply |
+| <a name="output_pool_ids"></a> [pool\_ids](#output\_pool\_ids) | Map from the keys of `pools` to the ID of each created pool, flattened across<br/>every depth tier.<br/><br/>This is the module's primary interface. The keys are the ones you supplied, so<br/>a downstream component can re-export this map whole and let its own consumers<br/>index it by name without knowing anything about the pool hierarchy |
+| <a name="output_pool_names"></a> [pool\_names](#output\_pool\_names) | Map from the keys of `pools` to the null-label ID generated for each pool —<br/>the value used as that pool's `Name` tag and as its default description |
+| <a name="output_pool_scope_ids"></a> [pool\_scope\_ids](#output\_pool\_scope\_ids) | Map from the keys of `pools` to the scope each pool was created in, flattened across every depth tier |
+| <a name="output_pool_states"></a> [pool\_states](#output\_pool\_states) | Map from the keys of `pools` to the state of each created pool, flattened across every depth tier |
+| <a name="output_private_default_scope_id"></a> [private\_default\_scope\_id](#output\_private\_default\_scope\_id) | ID of the IPAM's private default scope, which top-level pools land in unless they name another |
+| <a name="output_public_default_scope_id"></a> [public\_default\_scope\_id](#output\_public\_default\_scope\_id) | ID of the IPAM's public default scope. Read-only: additional public scopes<br/>cannot be created, so this is the only public scope there will ever be.<br/>`null` when `create_ipam` is `false` |
+| <a name="output_ram_resource_share_arns"></a> [ram\_resource\_share\_arns](#output\_ram\_resource\_share\_arns) | Map from the keys of `pools` that requested RAM sharing to the ARN of that pool's resource share |
+| <a name="output_resource_discovery_arn"></a> [resource\_discovery\_arn](#output\_resource\_discovery\_arn) | ARN of the resource discovery created by this module. `null` when `create_resource_discovery` is `false` |
+| <a name="output_resource_discovery_association_ids"></a> [resource\_discovery\_association\_ids](#output\_resource\_discovery\_association\_ids) | Map from the keys of `resource_discovery_associations` to the ID of each association |
+| <a name="output_resource_discovery_id"></a> [resource\_discovery\_id](#output\_resource\_discovery\_id) | ID of the resource discovery created by this module. `null` when `create_resource_discovery` is `false` |
+| <a name="output_scope_arns"></a> [scope\_arns](#output\_scope\_arns) | Map from the keys of `scopes` to the ARN of each created scope |
+| <a name="output_scope_count"></a> [scope\_count](#output\_scope\_count) | Number of scopes on the IPAM, including the two default ones |
+| <a name="output_scope_ids"></a> [scope\_ids](#output\_scope\_ids) | Map from the keys of `scopes` to the ID of each created scope |
 <!-- markdownlint-restore -->
 
 
@@ -172,12 +481,20 @@ Here is an example of using this module:
 Check out these related projects.
 
 - [terraform-null-label](https://github.com/cloudposse/terraform-null-label) - Terraform module designed to generate consistent names and tags for resources. Use terraform-null-label to implement a strict naming convention.
+- [terraform-aws-vpc](https://github.com/cloudposse/terraform-aws-vpc) - Terraform module to provision a VPC. Consumes IPAM pools through `ipv4_ipam_pool_id` and `ipv6_ipam_pool_id`.
+- [terraform-aws-dynamic-subnets](https://github.com/cloudposse/terraform-aws-dynamic-subnets) - Terraform module to provision subnets. Consumes IPAM pools when allocating subnet CIDRs.
+- [terraform-aws-transit-gateway](https://github.com/cloudposse/terraform-aws-transit-gateway) - Terraform module to provision a Transit Gateway, with the same RAM-based cross-account sharing model this module uses for pools.
 
 
 ## References
 
 For additional context, refer to some of these links.
 
+- [What is IPAM?](https://docs.aws.amazon.com/vpc/latest/ipam/what-it-is-ipam.html) - Amazon VPC IP Address Manager concepts: IPAMs, scopes, pools, allocations, and resource discovery.
+- [IPAM pool hierarchy planning](https://docs.aws.amazon.com/vpc/latest/ipam/planning-examples-ipam.html) - AWS guidance on structuring top-level, Regional, and workload pools.
+- [Share an IPAM pool using AWS RAM](https://docs.aws.amazon.com/vpc/latest/ipam/share-pool-ipam.html) - How IPAM pools are shared with other accounts and organizational units.
+- [IPAM quotas](https://docs.aws.amazon.com/vpc/latest/ipam/quotas-ipam.html) - Service quotas for IPAMs, scopes, pools, pool depth, and resource discovery exclusions.
+- [aws_vpc_ipam resource documentation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam) - Terraform AWS provider documentation for the IPAM resource family.
 - [Cloud Posse Documentation](https://docs.cloudposse.com) - The Cloud Posse Developer Hub (documentation)
 - [Terraform Standard Module Structure](https://www.terraform.io/docs/language/modules/develop/structure.html) - HashiCorp's standard module structure is a file and directory layout we recommend for reusable modules distributed in separate repositories.
 - [Terraform Module Requirements](https://www.terraform.io/docs/registry/modules/publish.html#requirements) - HashiCorp's guidance on all the requirements for publishing a module. Meeting the requirements for publishing a module is extremely easy.
@@ -185,46 +502,6 @@ For additional context, refer to some of these links.
 
 
 
-> [!TIP]
-> #### Use Terraform Reference Architectures for AWS
->
-> Use Cloud Posse's ready-to-go [terraform architecture blueprints](https://cloudposse.com/reference-architecture/) for AWS to get up and running quickly.
->
-> ✅ We build it together with your team.<br/>
-> ✅ Your team owns everything.<br/>
-> ✅ 100% Open Source and backed by fanatical support.<br/>
->
-> <a href="https://cpco.io/commercial-support?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-example-module&utm_content=commercial_support"><img alt="Request Quote" src="https://img.shields.io/badge/request%20quote-success.svg?style=for-the-badge"/></a>
-> <details><summary>📚 <strong>Learn More</strong></summary>
->
-> <br/>
->
-> Cloud Posse is the leading [**DevOps Accelerator**](https://cpco.io/commercial-support?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-example-module&utm_content=commercial_support) for funded startups and enterprises.
->
-> *Your team can operate like a pro today.*
->
-> Ensure that your team succeeds by using Cloud Posse's proven process and turnkey blueprints. Plus, we stick around until you succeed.
-> #### Day-0:  Your Foundation for Success
-> - **Reference Architecture.** You'll get everything you need from the ground up built using 100% infrastructure as code.
-> - **Deployment Strategy.** Adopt a proven deployment strategy with GitHub Actions, enabling automated, repeatable, and reliable software releases.
-> - **Site Reliability Engineering.** Gain total visibility into your applications and services with Datadog, ensuring high availability and performance.
-> - **Security Baseline.** Establish a secure environment from the start, with built-in governance, accountability, and comprehensive audit logs, safeguarding your operations.
-> - **GitOps.** Empower your team to manage infrastructure changes confidently and efficiently through Pull Requests, leveraging the full power of GitHub Actions.
->
-> <a href="https://cpco.io/commercial-support?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-example-module&utm_content=commercial_support"><img alt="Request Quote" src="https://img.shields.io/badge/request%20quote-success.svg?style=for-the-badge"/></a>
->
-> #### Day-2: Your Operational Mastery
-> - **Training.** Equip your team with the knowledge and skills to confidently manage the infrastructure, ensuring long-term success and self-sufficiency.
-> - **Support.** Benefit from a seamless communication over Slack with our experts, ensuring you have the support you need, whenever you need it.
-> - **Troubleshooting.** Access expert assistance to quickly resolve any operational challenges, minimizing downtime and maintaining business continuity.
-> - **Code Reviews.** Enhance your team’s code quality with our expert feedback, fostering continuous improvement and collaboration.
-> - **Bug Fixes.** Rely on our team to troubleshoot and resolve any issues, ensuring your systems run smoothly.
-> - **Migration Assistance.** Accelerate your migration process with our dedicated support, minimizing disruption and speeding up time-to-value.
-> - **Customer Workshops.** Engage with our team in weekly workshops, gaining insights and strategies to continuously improve and innovate.
->
-> <a href="https://cpco.io/commercial-support?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-example-module&utm_content=commercial_support"><img alt="Request Quote" src="https://img.shields.io/badge/request%20quote-success.svg?style=for-the-badge"/></a>
-> 
-</details>
 
 ## ✨ Contributing
 
@@ -234,14 +511,14 @@ This project is under active development, and we encourage contributions from ou
 
 Many thanks to our outstanding contributors:
 
-<a href="https://github.com/cloudposse/terraform-example-module/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=cloudposse/terraform-example-module&max=24" />
+<a href="https://github.com/cloudposse/terraform-aws-ipam/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=cloudposse/terraform-aws-ipam&max=24" />
 </a>
 
-For 🐛 bug reports & feature requests, please use the [issue tracker](https://github.com/cloudposse/terraform-example-module/issues).
+For 🐛 bug reports & feature requests, please use the [issue tracker](https://github.com/cloudposse/terraform-aws-ipam/issues).
 
 In general, PRs are welcome. We follow the typical "fork-and-pull" Git workflow.
- 1. Review our [Code of Conduct](https://github.com/cloudposse/terraform-example-module/?tab=coc-ov-file#code-of-conduct) and [Contributor Guidelines](https://github.com/cloudposse/.github/blob/main/CONTRIBUTING.md).
+ 1. Review our [Code of Conduct](https://github.com/cloudposse/terraform-aws-ipam/?tab=coc-ov-file#code-of-conduct) and [Contributor Guidelines](https://github.com/cloudposse/.github/blob/main/CONTRIBUTING.md).
  2. **Fork** the repo on GitHub
  3. **Clone** the project to your own machine
  4. **Commit** changes to your own branch
@@ -284,16 +561,16 @@ Learn more about our [automated testing in our documentation](https://docs.cloud
 
 ### 🌎 Slack Community
 
-Join our [Open Source Community](https://cpco.io/slack?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-example-module&utm_content=slack) on Slack. It's **FREE** for everyone! Our "SweetOps" community is where you get to talk with others who share a similar vision for how to rollout and manage infrastructure. This is the best place to talk shop, ask questions, solicit feedback, and work together as a community to build totally *sweet* infrastructure.
+Join our [Open Source Community](https://cpco.io/slack?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-aws-ipam&utm_content=slack) on Slack. It's **FREE** for everyone! Our "SweetOps" community is where you get to talk with others who share a similar vision for how to rollout and manage infrastructure. This is the best place to talk shop, ask questions, solicit feedback, and work together as a community to build totally *sweet* infrastructure.
 
 ### 📰 Newsletter
 
-Sign up for [our newsletter](https://cpco.io/newsletter?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-example-module&utm_content=newsletter) and join 3,000+ DevOps engineers, CTOs, and founders who get insider access to the latest DevOps trends, so you can always stay in the know.
+Sign up for [our newsletter](https://cpco.io/newsletter?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-aws-ipam&utm_content=newsletter) and join 3,000+ DevOps engineers, CTOs, and founders who get insider access to the latest DevOps trends, so you can always stay in the know.
 Dropped straight into your Inbox every week — and usually a 5-minute read.
 
-### 📆 Office Hours <a href="https://cloudposse.com/office-hours?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-example-module&utm_content=office_hours"><img src="https://img.cloudposse.com/fit-in/200x200/https://cloudposse.com/wp-content/uploads/2019/08/Powered-by-Zoom.png" align="right" /></a>
+### 📆 Office Hours <a href="https://cloudposse.com/office-hours?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-aws-ipam&utm_content=office_hours"><img src="https://img.cloudposse.com/fit-in/200x200/https://cloudposse.com/wp-content/uploads/2019/08/Powered-by-Zoom.png" align="right" /></a>
 
-[Join us every Wednesday via Zoom](https://cloudposse.com/office-hours?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-example-module&utm_content=office_hours) for your weekly dose of insider DevOps trends, AWS news and Terraform insights, all sourced from our SweetOps community, plus a _live Q&A_ that you can’t find anywhere else.
+[Join us every Wednesday via Zoom](https://cloudposse.com/office-hours?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-aws-ipam&utm_content=office_hours) for your weekly dose of insider DevOps trends, AWS news and Terraform insights, all sourced from our SweetOps community, plus a _live Q&A_ that you can’t find anywhere else.
 It's **FREE** for everyone!
 ## License
 
@@ -333,10 +610,10 @@ All other trademarks referenced herein are the property of their respective owne
 
 ## Copyrights
 
-Copyright © 2021-2026 [Cloud Posse, LLC](https://cloudposse.com)
+Copyright © 2026-2026 [Cloud Posse, LLC](https://cloudposse.com)
 
 
 
-<a href="https://cloudposse.com/readme/footer/link?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-example-module&utm_content=readme_footer_link"><img alt="README footer" src="https://cloudposse.com/readme/footer/img"/></a>
+<a href="https://cloudposse.com/readme/footer/link?utm_source=github&utm_medium=readme&utm_campaign=cloudposse/terraform-aws-ipam&utm_content=readme_footer_link"><img alt="README footer" src="https://cloudposse.com/readme/footer/img"/></a>
 
-<img alt="Beacon" width="0" src="https://ga-beacon.cloudposse.com/UA-76589703-4/cloudposse/terraform-example-module?pixel&cs=github&cm=readme&an=terraform-example-module"/>
+<img alt="Beacon" width="0" src="https://ga-beacon.cloudposse.com/UA-76589703-4/cloudposse/terraform-aws-ipam?pixel&cs=github&cm=readme&an=terraform-aws-ipam"/>

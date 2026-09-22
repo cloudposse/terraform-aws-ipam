@@ -1,14 +1,24 @@
 variable "region" {
-  type = string
+  type        = string
+  description = "AWS Region to deploy the example into"
 }
 
-variable "example_input" {
-  type        = string
-  description = "The value which will be passed to the example module"
+variable "operating_regions" {
+  type        = list(string)
+  description = <<-EOT
+    Regions the IPAM may discover, monitor, and allocate from. Must include
+    `region`, which the provider enforces at create time
+    EOT
+  default     = []
+  nullable    = false
 }
 
-variable "example_input_override" {
+variable "top_level_cidr" {
   type        = string
-  default     = null
-  description = "Override for `example_input`"
+  description = "CIDR provisioned into the top-level pool, from which every child pool draws"
+}
+
+variable "scope_name" {
+  type        = string
+  description = "Name of the additional private scope the pool hierarchy is created in"
 }

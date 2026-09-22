@@ -1,4 +1,4 @@
-module github.com/cloudposse/terraform-example-module
+module github.com/cloudposse/terraform-aws-ipam
 
 go 1.24
 
