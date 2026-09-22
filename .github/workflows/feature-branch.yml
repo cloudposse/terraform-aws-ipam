@@ -1,0 +1,31 @@
+name: Feature Branch
+on:
+  pull_request:
+    branches: [ 'main' ]
+    types: [opened, synchronize, reopened, closed, labeled, unlabeled]
+
+permissions:
+  pull-requests: write
+  deployments: write
+  id-token: write
+  contents: read
+
+jobs:
+  terraform-format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Terraform format
+        uses: dflook/terraform-fmt@v1
+
+      - name: Reviewdog suggester
+        uses: reviewdog/action-suggester@v1
+        with:
+          tool_name: "`terraform fmt -recursive .`"
+          cleanup: false
+
+      - name: Status check
+        shell: bash
+        run: git diff --exit-code
