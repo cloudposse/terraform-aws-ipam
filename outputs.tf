@@ -144,3 +144,66 @@ output "ram_resource_share_arns" {
   description = "Map from the keys of `pools` that requested RAM sharing to the ARN of that pool's resource share"
   value       = { for k, v in aws_ram_resource_share.default : k => v.arn }
 }
+
+# ------------------------------------------------------------------------------
+# Whole-resource pass-throughs
+#
+# The scalar outputs above are the stable interface — named, documented, and safe
+# to depend on. These expose each managed resource in full, keyed the same way, so
+# any attribute the scalars don't surface (tier, enable_private_gua, metered_account,
+# is_default, pool_count, locale, pool_depth, source_ipam_pool_id, resource_id/owner/
+# type, state, region, tags_all, ...) is still reachable — including attributes the
+# AWS provider adds in future versions, with no change to this module. Consumers that
+# only need an ID should use the scalar outputs; reach for these when you need a field
+# the scalars don't carry.
+# ------------------------------------------------------------------------------
+
+output "ipam" {
+  description = "The full `aws_vpc_ipam` resource created by this module (all attributes). `null` when `create_ipam` is `false`"
+  value       = one(aws_vpc_ipam.default[*])
+}
+
+output "scopes" {
+  description = "Map from the keys of `scopes` to the full `aws_vpc_ipam_scope` resource (all attributes)"
+  value       = aws_vpc_ipam_scope.default
+}
+
+output "pools" {
+  description = "Map from the keys of `pools` to the full `aws_vpc_ipam_pool` resource (all attributes), flattened across every depth tier"
+  value = merge(
+    aws_vpc_ipam_pool.level_0,
+    aws_vpc_ipam_pool.level_1,
+    aws_vpc_ipam_pool.level_2,
+    aws_vpc_ipam_pool.level_3,
+  )
+}
+
+output "pool_cidrs_detail" {
+  description = "Map from `<pool name>/<cidr name>` to the full `aws_vpc_ipam_pool_cidr` resource (all attributes), flattened across every depth tier"
+  value = merge(
+    aws_vpc_ipam_pool_cidr.level_0,
+    aws_vpc_ipam_pool_cidr.level_1,
+    aws_vpc_ipam_pool_cidr.level_2,
+    aws_vpc_ipam_pool_cidr.level_3,
+  )
+}
+
+output "allocations" {
+  description = "Map from `<pool name>/<allocation name>` to the full `aws_vpc_ipam_pool_cidr_allocation` resource (all attributes), including `resource_id`, `resource_owner`, `resource_type` and `netmask_length`"
+  value       = aws_vpc_ipam_pool_cidr_allocation.default
+}
+
+output "resource_discovery" {
+  description = "The full `aws_vpc_ipam_resource_discovery` resource created by this module (all attributes, including `owner_id` and `is_default`). `null` when `create_resource_discovery` is `false`"
+  value       = one(aws_vpc_ipam_resource_discovery.default[*])
+}
+
+output "resource_discovery_associations" {
+  description = "Map from the keys of `resource_discovery_associations` to the full `aws_vpc_ipam_resource_discovery_association` resource (all attributes, including `state`, `owner_id` and `ipam_arn`)"
+  value       = aws_vpc_ipam_resource_discovery_association.default
+}
+
+output "ram_resource_shares" {
+  description = "Map from the keys of `pools` that requested RAM sharing to the full `aws_ram_resource_share` resource (all attributes)"
+  value       = aws_ram_resource_share.default
+}

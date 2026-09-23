@@ -22,3 +22,13 @@ output "service_principal" {
   description = "Service principal the delegation is registered against, always `ipam.amazonaws.com`"
   value       = one(aws_vpc_ipam_organization_admin_account.default[*].service_principal)
 }
+
+output "id" {
+  description = "The delegated admin account ID (the resource's Terraform ID). `null` when disabled"
+  value       = one(aws_vpc_ipam_organization_admin_account.default[*].id)
+}
+
+output "delegation" {
+  description = "The full `aws_vpc_ipam_organization_admin_account` resource (all attributes). `null` when disabled"
+  value       = one(aws_vpc_ipam_organization_admin_account.default[*])
+}
