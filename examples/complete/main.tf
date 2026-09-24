@@ -7,9 +7,11 @@ module "ipam" {
 
   operating_regions = var.operating_regions
 
-  # The free tier is enough for this example; the provider would otherwise
-  # default to the billable `advanced` tier.
-  ipam_tier = "free"
+  # The `advanced` tier is required because this example creates an additional
+  # scope below — AWS rejects `CreateIpamScope` on the `free` tier with
+  # "You cannot create a private scope". The free tier only supports the two
+  # default scopes IPAM makes with itself.
+  ipam_tier = "advanced"
 
   # Exercises the explicit-scope path. Pools name this scope by key, and the
   # children inherit it from their parent rather than falling back to the IPAM's

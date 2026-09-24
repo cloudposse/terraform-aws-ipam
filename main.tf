@@ -138,10 +138,13 @@ locals {
     )
   }
 
-  pools_level_0 = { for k, v in var.pools : k => v if local.pool_depths[k] == 0 }
-  pools_level_1 = { for k, v in var.pools : k => v if local.pool_depths[k] == 1 }
-  pools_level_2 = { for k, v in var.pools : k => v if local.pool_depths[k] == 2 }
-  pools_level_3 = { for k, v in var.pools : k => v if local.pool_depths[k] == 3 }
+  # Gated on `enabled`: when the module is disabled the pool resources have no
+  # instances, so `pools_level_0_scope_ids` below (and the CIDR/allocation locals
+  # in pools.tf) must not index the now-empty `aws_vpc_ipam_scope.default`.
+  pools_level_0 = { for k, v in var.pools : k => v if local.enabled && local.pool_depths[k] == 0 }
+  pools_level_1 = { for k, v in var.pools : k => v if local.enabled && local.pool_depths[k] == 1 }
+  pools_level_2 = { for k, v in var.pools : k => v if local.enabled && local.pool_depths[k] == 2 }
+  pools_level_3 = { for k, v in var.pools : k => v if local.enabled && local.pool_depths[k] == 3 }
 
   # Scope for a top-level pool: an explicit ID wins, then a scope this module
   # created, then the IPAM's private default scope. Child pools inherit their
