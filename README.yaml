@@ -1,19 +1,10 @@
-#         DELETE ME
-#
-# The above is the README configuration for the Example module itself.
-# Delete from here to the top of file and fill in the template below
-########################################################################################################################
-########################################################################################################################
-########################################################################################################################
-
-
 #
 # This is the canonical configuration for the `README.md`
-# Run `make readme` to rebuild the `README.md`
+# Run `atmos readme` to rebuild the `README.md`
 #
 
 # Name of this project
-name: terraform-example-module
+name: terraform-aws-ipam
 
 # Logo for this project
 #logo: docs/logo.png
@@ -25,19 +16,19 @@ license: "APACHE2"
 copyrights:
   - name: "Cloud Posse, LLC"
     url: "https://cloudposse.com"
-    year: "2021"
+    year: "2026"
 
 # Canonical GitHub repo
-github_repo: cloudposse/terraform-example-module
+github_repo: cloudposse/terraform-aws-ipam
 
 # Badges to display
 badges:
   - name: Latest Release
-    image: https://img.shields.io/github/release/cloudposse/terraform-example-module.svg?style=for-the-badge
-    url: https://github.com/cloudposse/terraform-example-module/releases/latest
+    image: https://img.shields.io/github/release/cloudposse/terraform-aws-ipam.svg?style=for-the-badge
+    url: https://github.com/cloudposse/terraform-aws-ipam/releases/latest
   - name: Last Updated
-    image: https://img.shields.io/github/last-commit/cloudposse/terraform-example-module.svg?style=for-the-badge
-    url: https://github.com/cloudposse/terraform-example-module/commits
+    image: https://img.shields.io/github/last-commit/cloudposse/terraform-aws-ipam.svg?style=for-the-badge
+    url: https://github.com/cloudposse/terraform-aws-ipam/commits
   - name: Slack Community
     image: https://slack.cloudposse.com/for-the-badge.svg
     url: https://cloudposse.com/slack
@@ -47,9 +38,33 @@ related:
   - name: "terraform-null-label"
     description: "Terraform module designed to generate consistent names and tags for resources. Use terraform-null-label to implement a strict naming convention."
     url: "https://github.com/cloudposse/terraform-null-label"
+  - name: "terraform-aws-vpc"
+    description: "Terraform module to provision a VPC. Consumes IPAM pools through `ipv4_ipam_pool_id` and `ipv6_ipam_pool_id`."
+    url: "https://github.com/cloudposse/terraform-aws-vpc"
+  - name: "terraform-aws-dynamic-subnets"
+    description: "Terraform module to provision subnets. Consumes IPAM pools when allocating subnet CIDRs."
+    url: "https://github.com/cloudposse/terraform-aws-dynamic-subnets"
+  - name: "terraform-aws-transit-gateway"
+    description: "Terraform module to provision a Transit Gateway, with the same RAM-based cross-account sharing model this module uses for pools."
+    url: "https://github.com/cloudposse/terraform-aws-transit-gateway"
 
 # List any resources helpful for someone to get started. For example, link to the hashicorp documentation or AWS documentation.
 references:
+  - name: "What is IPAM?"
+    description: "Amazon VPC IP Address Manager concepts: IPAMs, scopes, pools, allocations, and resource discovery."
+    url: "https://docs.aws.amazon.com/vpc/latest/ipam/what-it-is-ipam.html"
+  - name: "IPAM pool hierarchy planning"
+    description: "AWS guidance on structuring top-level, Regional, and workload pools."
+    url: "https://docs.aws.amazon.com/vpc/latest/ipam/planning-examples-ipam.html"
+  - name: "Share an IPAM pool using AWS RAM"
+    description: "How IPAM pools are shared with other accounts and organizational units."
+    url: "https://docs.aws.amazon.com/vpc/latest/ipam/share-pool-ipam.html"
+  - name: "IPAM quotas"
+    description: "Service quotas for IPAMs, scopes, pools, pool depth, and resource discovery exclusions."
+    url: "https://docs.aws.amazon.com/vpc/latest/ipam/quotas-ipam.html"
+  - name: "aws_vpc_ipam resource documentation"
+    description: "Terraform AWS provider documentation for the IPAM resource family."
+    url: "https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_ipam"
   - name: "Cloud Posse Documentation"
     url: "https://docs.cloudposse.com"
     description: "The Cloud Posse Developer Hub (documentation)"
@@ -65,50 +80,255 @@ references:
 
 # Short description of this project
 description: |-
-  Short
-  description
+  Terraform module to provision:
+
+  - [Amazon VPC IP Address Manager (IPAM)](https://docs.aws.amazon.com/vpc/latest/ipam/what-it-is-ipam.html)
+  - [Private IPAM scopes](https://docs.aws.amazon.com/vpc/latest/ipam/how-it-works-ipam.html) (public scopes cannot be created; the one AWS
+    makes with the IPAM is exported as `public_default_scope_id`)
+  - [IPAM pools](https://docs.aws.amazon.com/vpc/latest/ipam/how-it-works-ipam.html), nested up to four levels deep, including VPC
+    resource-planning pools via `source_resource`
+  - [CIDRs provisioned into those pools](https://docs.aws.amazon.com/vpc/latest/ipam/prov-cidr-ipam.html), by explicit CIDR or by netmask
+    length, with BYOIP authorization contexts where required
+  - [Manual CIDR reservations](https://docs.aws.amazon.com/vpc/latest/ipam/allocate-cidrs-ipam.html) that hold space inside a pool without
+    attaching it to anything
+  - [Resource discovery](https://docs.aws.amazon.com/vpc/latest/ipam/res-disc-work-with.html) and resource discovery associations, for
+    cross-account and cross-organization monitoring, with organizational unit exclusions
+  - [AWS Resource Access Manager (AWS RAM)](https://docs.aws.amazon.com/ram/latest/userguide/what-is.html) resource shares, to share
+    individual pools with accounts, organizational units, or the whole organization
+  - [Delegated IPAM administration](https://docs.aws.amazon.com/vpc/latest/ipam/enable-integ-ipam.html) via the
+    [`organization-admin`](modules/organization-admin) submodule
 
 # Introduction to the project
 introduction: |-
-  This is an introduction.
+  ### The pool hierarchy
+
+  IPAM pools form a tree: a top-level pool holds a supernet, Regional pools draw
+  from it, and workload pools draw from those. This module takes that tree as a
+  **flat `map(object)` keyed by your own name for each pool**, where a pool names
+  its parent rather than being physically nested inside it:
+
+  ```hcl
+  pools = {
+    core     = { cidrs = { primary = { cidr = "10.0.0.0/8" } } }
+    regional = { parent = "core", locale = "us-east-2", cidrs = { primary = { netmask_length = 12 } } }
+    env      = { parent = "regional", locale = "us-east-2", cidrs = { primary = { netmask_length = 16 } } }
+  }
+  ```
+
+  Two reasons it is flat rather than nested:
+
+  1. **Terraform cannot express a recursive type.** A nested `sub_pools` attribute
+     forces `type = any`, which gives up schema documentation, IDE completion, and
+     terraform-docs output. That is exactly what happened to `aws-ia/ipam`, whose
+     central `pool_configurations` input is `type = any` with a 25-line prose
+     schema in a comment. Every input in this module is concretely typed.
+  2. **Keys stay stable.** Adding or removing a pool does not disturb the
+     `for_each` keys of its siblings, and the `pool_ids` output stays keyed by the
+     names you chose.
+
+  Map keys must be known at `plan` time — they come from your configuration, not
+  from another resource's attributes.
+
+  ### Following a convention, and setting one
+
+  Worth being precise about which is which:
+
+  - The **input shape** follows an existing Cloud Posse convention. A flat
+    `map(object)` keyed by a logical name, concretely typed, `default = {}`,
+    `nullable = false`, key semantics in an inline comment, and the plan-time-key
+    caveat stated in the description is `terraform-aws-eks-cluster`'s
+    `access_entry_map` applied to a new domain.
+  - The **per-depth materialisation** sets one. No Cloud Posse module had
+    previously modelled a hierarchy, so `aws_vpc_ipam_pool.level_0` … `.level_3`,
+    the depth partition in `locals`, and the `precondition` guards are new. They
+    follow the *spirit* of two existing patterns rather than any direct
+    precedent: `terraform-aws-dynamic-subnets` duplicates a near-identical
+    resource set across a structural dimension in-repo (`public.tf` / `private.tf`)
+    with the branching precomputed in `locals`, and `terraform-aws-vpc` already
+    splits level 0 from level N for a single concept — a `count`-gated
+    `aws_vpc.default` plus a `for_each`-keyed
+    `aws_vpc_ipv4_cidr_block_association.default` referencing it, which is
+    structurally one pool tier.
+
+  ### Why tiers are resources here, not a child module
+
+  `aws-ia/ipam` solves the same recursion problem by calling a shared
+  `./modules/sub_pool` child module once per depth. This module uses four
+  resources in the root instead, deliberately:
+
+  - A `sub_pool` module has no standalone value. Every `modules/*` in the Cloud
+    Posse fleet is separately documented and separately consumable; a
+    deduplication helper is not.
+  - It keeps resource addresses shallow and predictable —
+    `aws_vpc_ipam_pool.level_1["core"]` rather than
+    `module.level_one["core"].aws_vpc_ipam_pool.sub[0]`. That matters concretely:
+    a consumer migrating between modules has to hand-write `moved` blocks against
+    these addresses, because a `moved` block can only name addresses relative to
+    its own module instance and so cannot be shipped here. Burying addresses one
+    module deep is precisely what makes migrating *off* `aws-ia/ipam` painful, so
+    reproducing it would be self-defeating.
+  - A child module would need its own `context.tf`, `versions.tf` and
+    `README.md`, and CI runs the full bats and tflint matrix over every directory
+    containing a `.tf` file.
+
+  ### Depth is capped at 4
+
+  A pool hierarchy in this module can be **four levels deep**: a top-level pool
+  plus three generations beneath it. This is a Terraform limitation rather than an
+  AWS one. A resource cannot reference itself, so
+  `source_ipam_pool_id = aws_vpc_ipam_pool.this[each.value.parent].id` inside
+  `aws_vpc_ipam_pool.this` is a cycle. The module instead partitions your map by
+  computed depth and declares four tiers: `aws_vpc_ipam_pool.level_0` through
+  `.level_3`.
+
+  A deeper tree, a `parent` that names no existing pool, and a cycle in the
+  `parent` links are each rejected at plan time by a separate check that names
+  the offending pools — the three are reported distinctly rather than lumped
+  together, since a cycle is not a depth problem. Raising the cap later is a
+  non-breaking change: one more tier, no input or output shape change, no state
+  movement for existing pools.
+
+  ### Create and destroy ordering
+
+  CIDR provisioning is tiered alongside the pools, so creation runs
+  pool → its CIDRs → child pool → child's CIDRs, and destruction runs exactly
+  backwards. This is not cosmetic: `DeprovisionIpamPoolCidr` fails while any
+  allocation exists against a CIDR, and a child pool's provisioned CIDR is such an
+  allocation. Manual reservations likewise carry an explicit `depends_on` to the
+  pool CIDRs, because an allocation that references only `ipam_pool_id` gets no
+  dependency edge to the CIDR it consumes. Getting this wrong does not fail fast —
+  it burns the provider's 32-minute allocation-release timeout and *then* fails.
+
+  The module cannot order things it cannot see. A VPC or subnet created from one
+  of these pools makes an allocation outside this module's graph, and AWS takes up
+  to 20 minutes to release it after the consumer is deleted. Keep such consumers
+  in the same configuration with a `depends_on`, or expect a cold destroy to sit
+  in that wait.
+
+  ### Provider floor
+
+  The module requires AWS provider **`>= 6.56.0`**. The strict floor for the
+  complete argument surface is 6.48.0, which added `tags` to
+  `aws_vpc_ipam_pool_cidr_allocation`. The higher floor buys two fixes that matter
+  to IPAM specifically: `aws_subnet` now waits for IPAM to release its CIDR on
+  delete — the one destroy-ordering hazard no amount of `depends_on` inside this
+  module can fix — and resource-planning pools no longer fail when the VPC lives
+  in another account. Pin lower only if you use neither IPAM-backed subnets nor
+  cross-account `source_resource` pools.
+
+  ### Migrating from `aws-ia/ipam`
+
+  See [docs/migration-aws-ia-v1.md](docs/migration-aws-ia-v1.md) for the input
+  mapping, the `moved` blocks to write in your root module, and `state mv` /
+  `import` fallbacks.
 
 # How to use this module. Should be an easy example to copy and paste.
 usage: |-
-  For a complete example, see [examples/complete](examples/complete).
-
-  For automated tests of the complete example using [bats](https://github.com/bats-core/bats-core) and [Terratest](https://github.com/gruntwork-io/terratest)
-  (which tests and deploys the example on AWS), see [test](test).
+  Here's how to invoke this module in your projects:
 
   ```hcl
-  # Create a standard label resource. See [null-label](https://github.com/cloudposse/terraform-null-label/#terraform-null-label--)
-  module "label" {
-    source  = "cloudposse/label/null"
-    # Cloud Posse recommends pinning every module to a specific version, though usually you want to use the current one
-    # version = "x.x.x"
-
-    namespace = "eg"
-    name      = "example"
-  }
-
-  module "example" {
-    source  = "cloudposse/*****/aws"
+  module "ipam" {
+    source  = "cloudposse/ipam/aws"
     # Cloud Posse recommends pinning every module to a specific version
     # version = "x.x.x"
 
-    example = "Hello world!"
+    operating_regions = ["us-east-2", "us-west-2"]
 
-    context = module.label.this
+    pools = {
+      core = {
+        cidrs = {
+          primary = { cidr = "10.0.0.0/8" }
+        }
+      }
+
+      use2 = {
+        parent = "core"
+        locale = "us-east-2"
+        cidrs = {
+          primary = { netmask_length = 12 }
+        }
+
+        # Share this pool with the whole organization
+        ram_share = {
+          principals = ["arn:aws:organizations::123456789012:organization/o-abcde12345"]
+        }
+      }
+
+      use2_prod = {
+        parent                            = "use2"
+        locale                            = "us-east-2"
+        allocation_default_netmask_length = 24
+
+        cidrs = {
+          primary = { netmask_length = 16 }
+        }
+
+        # Hold space inside the pool without attaching it to anything
+        allocations = {
+          reserved = { netmask_length = 20, description = "Held for future use" }
+        }
+      }
+    }
+
+    context = module.this.context
+  }
+  ```
+
+  Consumers index the `pool_ids` output by the names they supplied:
+
+  ```hcl
+  module "vpc" {
+    source  = "cloudposse/vpc/aws"
+    version = "2.2.0"
+
+    ipv4_primary_cidr_block_association = {
+      ipv4_ipam_pool_id   = module.ipam.pool_ids["use2_prod"]
+      ipv4_netmask_length = 20
+    }
+
+    context = module.this.context
   }
   ```
 
 # Example usage
 examples: |-
   Here is an example of using this module:
-  - [`examples/complete`](https://github.com/cloudposse/terraform-example-module/) - complete example of using this module
+
+  - [`examples/complete`](https://github.com/cloudposse/terraform-aws-ipam/tree/main/examples/complete) - builds a full four-level pool
+    hierarchy in a named private scope, provisions a CIDR into each tier, holds a manual reservation in the deepest pool, and creates a
+    resource discovery
+
+  For automated tests of the complete example using [Terratest](https://github.com/gruntwork-io/terratest) (which tests and deploys the
+  example on AWS), see [test](https://github.com/cloudposse/terraform-aws-ipam/tree/main/test).
 
 # How to get started quickly
 quickstart: |-
-  Here's how to get started...
+  The smallest useful configuration is an IPAM with a single pool:
+
+  ```hcl
+  module "ipam" {
+    source  = "cloudposse/ipam/aws"
+    # version = "x.x.x"
+
+    pools = {
+      core = {
+        cidrs = {
+          primary = { cidr = "10.0.0.0/8" }
+        }
+      }
+    }
+
+    context = module.this.context
+  }
+  ```
+
+  This creates the IPAM (which brings its own public scope, private scope, default
+  resource discovery, and default association), one top-level pool in the private
+  default scope, and provisions `10.0.0.0/8` into it. Grow the tree by adding
+  entries that name `core` as their `parent`.
+
+  Note that the provider defaults an IPAM to the billable `advanced` tier. Set
+  `ipam_tier = "free"` if that is what you want.
 
 # Other files to include in this README from the project folder
 include: []

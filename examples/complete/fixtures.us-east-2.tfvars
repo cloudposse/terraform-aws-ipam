@@ -8,5 +8,8 @@ stage = "test"
 
 name = "example"
 
-example_input = "Hello, world!"
+operating_regions = ["us-east-2"]
 
+top_level_cidr = "10.0.0.0/8"
+
+scope_name = "workloads"

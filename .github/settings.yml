@@ -1,12 +1,7 @@
 # Upstream changes from _extends are only recognized when modifications are made to this file in the default branch.
 _extends: .github
 repository:
-  name: terraform-example-module
-  description: Example Terraform Module Scaffolding
+  name: terraform-aws-ipam
+  description: Terraform module to provision Amazon VPC IP Address Manager (IPAM), scopes, a nested pool hierarchy, CIDR provisioning, reservations, resource discovery, and RAM sharing
   homepage: https://cloudposse.com/accelerate
-  topics: ""
-
-
-
-
-
+  topics: terraform, terraform-module, aws, ipam, vpc, networking, ip-address-management, cidr, ram
