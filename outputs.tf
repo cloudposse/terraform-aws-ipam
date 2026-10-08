@@ -146,6 +146,7 @@ output "ram_resource_share_arns" {
 }
 
 # ------------------------------------------------------------------------------
+#
 # Whole-resource pass-throughs
 #
 # The scalar outputs above are the stable interface — named, documented, and safe
