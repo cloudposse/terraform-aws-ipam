@@ -361,7 +361,7 @@ example on AWS), see [test](https://github.com/cloudposse/terraform-aws-ipam/tre
 
 | Name | Version |
 | ---- | ------- |
-| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.66.0 |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | >= 6.56.0 |
 | <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
 
 ## Modules
@@ -448,26 +448,34 @@ example on AWS), see [test](https://github.com/cloudposse/terraform-aws-ipam/tre
 | ---- | ----------- |
 | <a name="output_allocation_cidrs"></a> [allocation\_cidrs](#output\_allocation\_cidrs) | Map from `<pool name>/<allocation name>` to the CIDR reserved by each manual reservation |
 | <a name="output_allocation_ids"></a> [allocation\_ids](#output\_allocation\_ids) | Map from `<pool name>/<allocation name>` to the AWS allocation ID of each<br/>manual reservation.<br/><br/>This is `ipam_pool_allocation_id`, not the Terraform resource ID — the latter<br/>is the composite `<allocation id>_<pool id>` and is what `terraform import`<br/>takes |
+| <a name="output_allocations"></a> [allocations](#output\_allocations) | Map from `<pool name>/<allocation name>` to the full `aws_vpc_ipam_pool_cidr_allocation` resource (all attributes), including `resource_id`, `resource_owner`, `resource_type` and `netmask_length` |
 | <a name="output_default_resource_discovery_association_id"></a> [default\_resource\_discovery\_association\_id](#output\_default\_resource\_discovery\_association\_id) | ID of the resource discovery association IPAM creates alongside itself. Not managed by this module |
 | <a name="output_default_resource_discovery_id"></a> [default\_resource\_discovery\_id](#output\_default\_resource\_discovery\_id) | ID of the resource discovery IPAM creates alongside itself. Not managed by this module |
+| <a name="output_ipam"></a> [ipam](#output\_ipam) | The full `aws_vpc_ipam` resource created by this module (all attributes). `null` when `create_ipam` is `false` |
 | <a name="output_ipam_arn"></a> [ipam\_arn](#output\_ipam\_arn) | ARN of the IPAM created by this module. `null` when `create_ipam` is `false` |
 | <a name="output_ipam_id"></a> [ipam\_id](#output\_ipam\_id) | ID of the IPAM — the one created here, or `existing_ipam_id` when `create_ipam` is `false` |
 | <a name="output_pool_arns"></a> [pool\_arns](#output\_pool\_arns) | Map from the keys of `pools` to the ARN of each created pool, flattened across every depth tier |
 | <a name="output_pool_cidr_ids"></a> [pool\_cidr\_ids](#output\_pool\_cidr\_ids) | Map from `<pool name>/<cidr name>` to the Terraform ID of each provisioned pool CIDR, which is the composite `<cidr>_<pool id>` |
 | <a name="output_pool_cidrs"></a> [pool\_cidrs](#output\_pool\_cidrs) | Map from the keys of `pools` to the list of CIDRs provisioned into that pool.<br/><br/>A pool with no provisioned CIDRs maps to an empty list. Values for CIDRs<br/>requested by `netmask_length` are chosen by IPAM and so are only known after<br/>apply |
+| <a name="output_pool_cidrs_detail"></a> [pool\_cidrs\_detail](#output\_pool\_cidrs\_detail) | Map from `<pool name>/<cidr name>` to the full `aws_vpc_ipam_pool_cidr` resource (all attributes), flattened across every depth tier |
 | <a name="output_pool_ids"></a> [pool\_ids](#output\_pool\_ids) | Map from the keys of `pools` to the ID of each created pool, flattened across<br/>every depth tier.<br/><br/>This is the module's primary interface. The keys are the ones you supplied, so<br/>a downstream component can re-export this map whole and let its own consumers<br/>index it by name without knowing anything about the pool hierarchy |
 | <a name="output_pool_names"></a> [pool\_names](#output\_pool\_names) | Map from the keys of `pools` to the null-label ID generated for each pool —<br/>the value used as that pool's `Name` tag and as its default description |
 | <a name="output_pool_scope_ids"></a> [pool\_scope\_ids](#output\_pool\_scope\_ids) | Map from the keys of `pools` to the scope each pool was created in, flattened across every depth tier |
 | <a name="output_pool_states"></a> [pool\_states](#output\_pool\_states) | Map from the keys of `pools` to the state of each created pool, flattened across every depth tier |
+| <a name="output_pools"></a> [pools](#output\_pools) | Map from the keys of `pools` to the full `aws_vpc_ipam_pool` resource (all attributes), flattened across every depth tier |
 | <a name="output_private_default_scope_id"></a> [private\_default\_scope\_id](#output\_private\_default\_scope\_id) | ID of the IPAM's private default scope, which top-level pools land in unless they name another |
 | <a name="output_public_default_scope_id"></a> [public\_default\_scope\_id](#output\_public\_default\_scope\_id) | ID of the IPAM's public default scope. Read-only: additional public scopes<br/>cannot be created, so this is the only public scope there will ever be.<br/>`null` when `create_ipam` is `false` |
 | <a name="output_ram_resource_share_arns"></a> [ram\_resource\_share\_arns](#output\_ram\_resource\_share\_arns) | Map from the keys of `pools` that requested RAM sharing to the ARN of that pool's resource share |
+| <a name="output_ram_resource_shares"></a> [ram\_resource\_shares](#output\_ram\_resource\_shares) | Map from the keys of `pools` that requested RAM sharing to the full `aws_ram_resource_share` resource (all attributes) |
+| <a name="output_resource_discovery"></a> [resource\_discovery](#output\_resource\_discovery) | The full `aws_vpc_ipam_resource_discovery` resource created by this module (all attributes, including `owner_id` and `is_default`). `null` when `create_resource_discovery` is `false` |
 | <a name="output_resource_discovery_arn"></a> [resource\_discovery\_arn](#output\_resource\_discovery\_arn) | ARN of the resource discovery created by this module. `null` when `create_resource_discovery` is `false` |
 | <a name="output_resource_discovery_association_ids"></a> [resource\_discovery\_association\_ids](#output\_resource\_discovery\_association\_ids) | Map from the keys of `resource_discovery_associations` to the ID of each association |
+| <a name="output_resource_discovery_associations"></a> [resource\_discovery\_associations](#output\_resource\_discovery\_associations) | Map from the keys of `resource_discovery_associations` to the full `aws_vpc_ipam_resource_discovery_association` resource (all attributes, including `state`, `owner_id` and `ipam_arn`) |
 | <a name="output_resource_discovery_id"></a> [resource\_discovery\_id](#output\_resource\_discovery\_id) | ID of the resource discovery created by this module. `null` when `create_resource_discovery` is `false` |
 | <a name="output_scope_arns"></a> [scope\_arns](#output\_scope\_arns) | Map from the keys of `scopes` to the ARN of each created scope |
 | <a name="output_scope_count"></a> [scope\_count](#output\_scope\_count) | Number of scopes on the IPAM, including the two default ones |
 | <a name="output_scope_ids"></a> [scope\_ids](#output\_scope\_ids) | Map from the keys of `scopes` to the ID of each created scope |
+| <a name="output_scopes"></a> [scopes](#output\_scopes) | Map from the keys of `scopes` to the full `aws_vpc_ipam_scope` resource (all attributes) |
 <!-- markdownlint-restore -->
 
 
