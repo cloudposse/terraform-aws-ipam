@@ -357,13 +357,6 @@ example on AWS), see [test](https://github.com/cloudposse/terraform-aws-ipam/tre
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.4.0 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.56.0 |
 
-## Providers
-
-| Name | Version |
-| ---- | ------- |
-| <a name="provider_aws"></a> [aws](#provider\_aws) | >= 6.56.0 |
-| <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
-
 ## Modules
 
 | Name | Source | Version |
